@@ -19,15 +19,14 @@ import android.view.LayoutInflater;
 import android.view.Menu;
 import android.view.MenuItem;
 import android.view.View;
-import android.view.ViewGroup;
 import android.view.Window;
 import android.widget.AbsListView;
 import android.widget.AdapterView;
-import android.widget.BaseAdapter;
 import android.widget.ListView;
 import android.widget.TextView;
 
 import com.androidquery.service.MarketService;
+import com.google.common.base.Optional;
 import com.squareup.otto.Subscribe;
 
 import org.ligi.passandroid.App;
@@ -37,14 +36,12 @@ import org.ligi.passandroid.TrackerInterface;
 import org.ligi.passandroid.events.NavigationOpenedEvent;
 import org.ligi.passandroid.events.SortOrderChangeEvent;
 import org.ligi.passandroid.events.TypeFocusEvent;
-import org.ligi.passandroid.helper.PassVisualizer;
 import org.ligi.tracedroid.TraceDroid;
 import org.ligi.tracedroid.logging.Log;
 import org.ligi.tracedroid.sending.TraceDroidEmailSender;
 
 import java.io.File;
 import java.io.InputStream;
-import java.util.HashSet;
 
 import butterknife.ButterKnife;
 import butterknife.InjectView;
@@ -73,8 +70,11 @@ public class TicketListActivity extends ActionBarActivity {
     @InjectView(R.id.emptyView)
     TextView emptyView;
 
-    @InjectView(R.id.ptr_layout)
-    SwipeRefreshLayout swipeRefreshLayout;
+    @InjectView(R.id.list_swiperefresh_layout)
+    SwipeRefreshLayout listSwipeRefreshLayout;
+
+    @InjectView(R.id.empty_swiperefresh_layout)
+    SwipeRefreshLayout emptySwipeRefreshLayout;
 
     private ActionMode actionMode;
 
@@ -90,7 +90,7 @@ public class TicketListActivity extends ActionBarActivity {
     }
 
     @OnItemClick(R.id.content_list)
-    void lisItemCick(int position) {
+    void listItemClick(int position) {
         Intent intent = new Intent(TicketListActivity.this, TicketViewActivity.class);
         intent.putExtra("path", App.getPassStore().getPassbookAt(position).getPath());
         startActivity(intent);
@@ -113,12 +113,12 @@ public class TicketListActivity extends ActionBarActivity {
         setContentView(R.layout.ticket_list);
         ButterKnife.inject(this);
 
-        passadapter = new PassAdapter();
+        passadapter = new PassAdapter(this);
         listView.setAdapter(passadapter);
 
         inflater = getLayoutInflater();
 
-        listView.setEmptyView(emptyView);
+        listView.setEmptyView(emptySwipeRefreshLayout);
 
         // don't want too many windows in worst case - so check for errors first
         if (TraceDroid.getStackTraceFiles().length > 0) {
@@ -128,6 +128,11 @@ public class TicketListActivity extends ActionBarActivity {
             Tracker.get().trackEvent("ui_event", "processInputStream", "updatenotice", null);
             MarketService ms = new MarketService(this);
             ms.level(MarketService.MINOR).checkVersion();
+
+            AppRate.with(this)
+                    .retryPolicy(RetryPolicy.EXPONENTIAL)
+                    .initialLaunchCount(5)
+                    .checkAndShow();
         }
 
         drawerToggle = new ActionBarDrawerToggle(this, drawer, R.drawable.ic_drawer, R.string.drawer_open, R.string.drawer_close) {
@@ -201,6 +206,12 @@ public class TicketListActivity extends ActionBarActivity {
             }
         });
 
+        prepareRefreshLayout(listSwipeRefreshLayout);
+        prepareRefreshLayout(emptySwipeRefreshLayout);
+
+    }
+
+    private void prepareRefreshLayout(SwipeRefreshLayout swipeRefreshLayout) {
         swipeRefreshLayout.setColorScheme(R.color.icon_blue, R.color.icon_green, R.color.icon_lila, R.color.icon_orange);
         swipeRefreshLayout.setOnRefreshListener(new SwipeRefreshLayout.OnRefreshListener() {
             @Override
@@ -209,11 +220,6 @@ public class TicketListActivity extends ActionBarActivity {
                 scanForPasses();
             }
         });
-
-        AppRate.with(this)
-                .retryPolicy(RetryPolicy.EXPONENTIAL)
-                .initialLaunchCount(5)
-                .checkAndShow();
     }
 
     private void scanForPasses() {
@@ -283,7 +289,8 @@ public class TicketListActivity extends ActionBarActivity {
 
     public void updateUIToScanningState() {
 
-        swipeRefreshLayout.setRefreshing(scanning);
+        listSwipeRefreshLayout.setRefreshing(scanning);
+        emptySwipeRefreshLayout.setRefreshing(scanning);
 
         supportInvalidateOptionsMenu();
 
@@ -344,21 +351,14 @@ public class TicketListActivity extends ActionBarActivity {
         }
     }
 
-    class ScanForPassesTask extends AsyncTask<Void, String, Void> {
-
-        private long start_time;
-        private HashSet<String> processedAtTopLevelSet;
-
-        public ScanForPassesTask() {
-            processedAtTopLevelSet = new HashSet<>();
-        }
+    class ScanForPassesTask extends AsyncTask<Void, Optional<String>, Void> {
 
         @Override
-        protected void onProgressUpdate(String... values) {
+        protected void onProgressUpdate(Optional<String>... values) {
             super.onProgressUpdate(values);
             if (Build.VERSION.SDK_INT > 10) {
-                if (values != null) {
-                    getActionBar().setSubtitle(String.format(getString(R.string.searching_in), values[0]));
+                if (values[0].isPresent()) {
+                    getActionBar().setSubtitle(String.format(getString(R.string.searching_in), values[0].get()));
                 } else {
                     getActionBar().setSubtitle(null);
                 }
@@ -373,17 +373,23 @@ public class TicketListActivity extends ActionBarActivity {
          */
         private void search_in(String path) {
 
-            publishProgress(path);
+            publishProgress(Optional.of(path));
 
             if (path == null) {
                 Log.w("trying to search in null path");
                 return;
             }
 
-            File dir = new File(path);
-            File[] files = dir.listFiles();
+            final File dir = new File(path);
+            final File[] files = dir.listFiles();
 
-            if (files != null) for (File file : files) {
+            if (files == null || files.length == 0) {
+                // no files here
+                return;
+            }
+
+
+            for (File file : files) {
                 if (file.isDirectory()) {
                     search_in(file.toString());
                 } else if (file.getName().endsWith(".pkpass")) {
@@ -398,8 +404,6 @@ public class TicketListActivity extends ActionBarActivity {
         protected void onPreExecute() {
             super.onPreExecute();
             scanning = true;
-
-            start_time = System.currentTimeMillis();
 
             Tracker.get().trackEvent("ui_event", "scan", "started", null);
 
@@ -448,38 +452,9 @@ public class TicketListActivity extends ActionBarActivity {
             // | /data
             search_in(Environment.getDataDirectory().toString());
 
-            publishProgress(null);
+            publishProgress(Optional.<String>absent());
             return null;
         }
-    }
-
-    class PassAdapter extends BaseAdapter {
-
-        @Override
-        public int getCount() {
-            return App.getPassStore().passCount();
-        }
-
-        @Override
-        public Object getItem(int position) {
-            return null;
-        }
-
-        @Override
-        public long getItemId(int position) {
-            return 0;
-        }
-
-        @Override
-        public View getView(int position, View convertView, ViewGroup parent) {
-
-            View res = inflater.inflate(R.layout.pass_list_item, null);
-
-            PassVisualizer.visualize(TicketListActivity.this, App.getPassStore().getReducedPassbookAt(position), res);
-
-            return res;
-        }
-
     }
 
 }
